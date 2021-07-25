@@ -1,5 +1,8 @@
 model = dict(
     type='FVNet',
+    projection_cfg=dict(
+        size=(620, 190),
+        divisor=32),
     fv_backbone=dict(
         type='UNet',
         in_channels=5,
@@ -12,24 +15,24 @@ model = dict(
             type='FVNetBBoxCoder',
             prior_size=[1.6, 3.9, 1.56],
             code_size=8),
+        fg_weight=15,
+        bg_weight=1,
         loss_cls=dict(
             type='FocalLoss',
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
             loss_weight=1.0),
-        loss_bbox=dict(type='SmoothL1Loss', beta=1.0 / 9.0, loss_weight=2.0),
-    train_cfg=dict(
-        assigner=dict(type='InBoxAssigner'),
-        allowed_border=0,
-        pos_weight=-1,
-        debug=False),
-    test_cfg=dict(
-        use_rotate_nms=True,
-        nms_across_levels=False,
-        nms_thr=0.01,
-        score_thr=0.3,
-        min_bbox_size=0,
-        max_num=50)))
-
-find_unused_parameters = True
+        loss_bbox=dict(type='SmoothL1Loss', beta=1.0 / 9.0, loss_weight=4.0),
+        train_cfg=dict(
+            assigner=dict(type='InBoxAssigner'),
+            allowed_border=0,
+            pos_weight=-1,
+            debug=False),
+        test_cfg=dict(
+            use_rotate_nms=True,
+            nms_across_levels=False,
+            nms_thr=0.01,
+            score_thr=0.5,
+            min_bbox_size=0,
+            max_num=50)))

@@ -15,13 +15,11 @@ file_client_args = dict(backend='disk')
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 
-img_scale = (1242, 375)
-
 train_pipeline = [
-    dict(type='LoadImageFromFile'),
-    dict(type='Resize', img_scale=img_scale, keep_ratio=True),
-    dict(type='Normalize', **img_norm_cfg),
-    dict(type='Pad', size_divisor=32),
+    # dict(type='LoadImageFromFile'),
+    # dict(type='Resize', img_scale=img_scale, keep_ratio=True),
+    # dict(type='Normalize', **img_norm_cfg),
+    # dict(type='Pad', size_divisor=32),
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
@@ -33,45 +31,22 @@ train_pipeline = [
         with_bbox_3d=True,
         with_label_3d=True,
         file_client_args=file_client_args),
-    dict(type='ObjectSample', db_sampler=db_sampler),
-    dict(type='RandomFlip3D', flip_ratio_bev_horizontal=0.5),
+    # dict(type='ObjectSample', db_sampler=db_sampler),
+    # dict(type='RandomFlip3D', flip_ratio_bev_horizontal=0.5),
+    # dict(
+    #     type='GlobalRotScaleTrans',
+    #     scale_ratio_range=[0.95, 1.05]),
     dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
     dict(type='Collect3D', keys=['points', 'gt_bboxes_3d', 'gt_labels_3d'],
-        meta_keys=['sample_idx', 'lidar2img', 'ann_info',
-                   'box_type_3d', 'box_mode_3d',
-                   'img_shape', 'ori_shape', 'pad_size_divisor', 'scale_factor'])
+        meta_keys=['img_info', 'lidar2img', 'box_type_3d', 'box_mode_3d'])
 ]
 test_pipeline = [
-    dict(type='LoadImageFromFile'),
-    dict(type='Resize', img_scale=img_scale, keep_ratio=True),
-    dict(type='Normalize', **img_norm_cfg),
-    dict(type='Pad', size_divisor=32),
-    # dict(
-    #     type='LoadPointsFromFile',
-    #     coord_type='LIDAR',
-    #     load_dim=4,
-    #     use_dim=4,
-    #     file_client_args=file_client_args),
-    # dict(
-    #     type='LoadAnnotations3D',
-    #     with_bbox_3d=True,
-    #     with_label_3d=True,
-    #     file_client_args=file_client_args),
-    dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
-    dict(type='DefaultFormatBundle3D', class_names=class_names),
-    # dict(type='Collect3D', keys=['points', 'gt_bboxes_3d', 'gt_labels_3d'],
-    dict(type='Collect3D', keys=['points'],
-        meta_keys=['sample_idx', 'lidar2img', 'ann_info',
-                    'box_type_3d', 'box_mode_3d',
-                    'img_shape', 'ori_shape', 'pad_size_divisor', 'scale_factor'])
-]
-eval_pipeline = [
-    dict(type='LoadImageFromFile'),
-    dict(type='Resize', img_scale=img_scale, keep_ratio=True),
-    dict(type='Normalize', **img_norm_cfg),
-    dict(type='Pad', size_divisor=32),
+    # dict(type='LoadImageFromFile'),
+    # dict(type='Resize', img_scale=img_scale, keep_ratio=True),
+    # dict(type='Normalize', **img_norm_cfg),
+    # dict(type='Pad', size_divisor=32),
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
@@ -87,13 +62,33 @@ eval_pipeline = [
     dict(type='DefaultFormatBundle3D', class_names=class_names),
     # dict(type='Collect3D', keys=['points', 'gt_bboxes_3d', 'gt_labels_3d'],
     dict(type='Collect3D', keys=['points'],
-        meta_keys=['sample_idx', 'lidar2img', 'ann_info',
-                    'box_type_3d', 'box_mode_3d',
-                    'img_shape', 'ori_shape', 'pad_size_divisor', 'scale_factor'])
+        meta_keys=['img_info', 'lidar2img', 'box_type_3d', 'box_mode_3d'])
+]
+eval_pipeline = [
+    # dict(type='LoadImageFromFile'),
+    # dict(type='Resize', img_scale=img_scale, keep_ratio=True),
+    # dict(type='Normalize', **img_norm_cfg),
+    # dict(type='Pad', size_divisor=32),
+    dict(
+        type='LoadPointsFromFile',
+        coord_type='LIDAR',
+        load_dim=4,
+        use_dim=4,
+        file_client_args=file_client_args),
+    dict(
+        type='LoadAnnotations3D',
+        with_bbox_3d=True,
+        with_label_3d=True,
+        file_client_args=file_client_args),
+    dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
+    dict(type='DefaultFormatBundle3D', class_names=class_names),
+    dict(type='Collect3D', keys=['points', 'gt_bboxes_3d', 'gt_labels_3d'],
+    # dict(type='Collect3D', keys=['points'],
+        meta_keys=['img_info', 'lidar2img', 'box_type_3d', 'box_mode_3d'])
 ]
 
 data = dict(
-    samples_per_gpu=4,
+    samples_per_gpu=16,
     workers_per_gpu=4,
     train=dict(
         type='RepeatDataset',
@@ -115,6 +110,7 @@ data = dict(
     val=dict(
         type=dataset_type,
         data_root=data_root,
+            # ann_file=data_root + 'kitti_infos_train.pkl',
         ann_file=data_root + 'kitti_infos_val.pkl',
         # ann_file=data_root + 'kitti_infos_debug.pkl',
         split='training',
@@ -127,7 +123,8 @@ data = dict(
     test=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + 'kitti_infos_val.pkl',
+        ann_file=data_root + 'kitti_infos_train.pkl',
+        # ann_file=data_root + 'kitti_infos_val.pkl',
         # ann_file=data_root + 'kitti_infos_debug.pkl',
         split='training',
         pts_prefix='velodyne_reduced',

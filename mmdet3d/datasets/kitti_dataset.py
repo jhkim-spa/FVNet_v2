@@ -6,6 +6,7 @@ import tempfile
 import torch
 from mmcv.utils import print_log
 from os import path as osp
+from PIL import Image
 
 from mmdet.datasets import DATASETS
 from ..core import show_multi_modality_result, show_result
@@ -114,6 +115,7 @@ class KittiDataset(Custom3DDataset):
         sample_idx = info['image']['image_idx']
         img_filename = os.path.join(self.data_root,
                                     info['image']['image_path'])
+        img_shape = Image.open(img_filename).size
 
         # TODO: consider use torch.Tensor only
         rect = info['calib']['R0_rect'].astype(np.float32)
@@ -126,7 +128,7 @@ class KittiDataset(Custom3DDataset):
             sample_idx=sample_idx,
             pts_filename=pts_filename,
             img_prefix=None,
-            img_info=dict(filename=img_filename),
+            img_info=dict(filename=img_filename, img_shape=img_shape),
             lidar2img=lidar2img)
 
         # if not self.test_mode:

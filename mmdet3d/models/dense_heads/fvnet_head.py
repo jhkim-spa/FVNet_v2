@@ -18,6 +18,8 @@ class FVNetHead(nn.Module):
                  num_classes,
                  feat_channels=64,
                  bbox_coder=dict(type='FVNetBBoxCoder'),
+                 fg_weight=1,
+                 bg_weight=1,
                  loss_cls=dict(
                      type='FocalLoss',
                      use_sigmoid=True,
@@ -30,6 +32,8 @@ class FVNetHead(nn.Module):
                  test_cfg=None):
         super().__init__()
         self.num_classes = num_classes
+        self.fg_weight = fg_weight
+        self.bg_weight = bg_weight
         self.feat_channels = feat_channels
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
@@ -43,31 +47,17 @@ class FVNetHead(nn.Module):
         self.loss_bbox = build_loss(loss_bbox)
 
         self._init_layers()
-        self._init_weight()
 
     def _init_layers(self):
         """Initialize neural network layers of the head."""
         # Classification layer
         self.cls_fc = nn.Sequential(
-            nn.Linear(self.feat_channels, self.feat_channels, bias=True),
-            nn.BatchNorm1d(self.feat_channels),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
             nn.Linear(self.feat_channels, self.num_classes)
         )
         # Regression layer
         self.reg_fc = nn.Sequential(
-            nn.Linear(self.feat_channels, self.feat_channels),
-            nn.BatchNorm1d(self.feat_channels),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
             nn.Linear(self.feat_channels, self.box_code_size)
         )
-
-    def _init_weight(self):
-        pi = 0.01
-        nn.init.constant_(self.cls_fc[-1].bias, -np.log((1 - pi) / pi))
-        nn.init.normal_(self.reg_fc[-1].weight, mean=0, std=0.001)
 
     def forward_single(self, x):
         cls_score = self.cls_fc(x)
@@ -89,17 +79,11 @@ class FVNetHead(nn.Module):
             valid_coords,
             gt_bboxes,
             gt_labels)
-        
-        if cls_reg_targets == None:
-            return dict(
-                loss_cls=valid_coords['2d'].sum() * 0,
-                loss_bbox=valid_coords['2d'].sum() * 0
-            )
 
         (cls_targets, bbox_targets, pos_idx,
          num_total_list, num_pos_list) = cls_reg_targets
 
-        losses_cls, losses_bbox = multi_apply( # multi-scale
+        losses_cls, losses_loc, losses_size, losses_angle = multi_apply( # multi-scale
             self.loss_single,
             [valid_coords], # TODO: multi-scale
             cls_scores,
@@ -111,26 +95,59 @@ class FVNetHead(nn.Module):
             [num_pos_list])
 
         return dict(
-            loss_cls=losses_cls, loss_bbox=losses_bbox)
+            loss_cls=losses_cls, loss_loc=losses_loc,
+            loss_size=losses_size, loss_angle=losses_angle)
 
     def loss_single(self, valid_coords, cls_score, bbox_pred,
                     cls_target, bbox_target, pos_idx,
                     num_total_list, num_pos_list):
         num_pos = sum(num_pos_list)
         # classification loss
+        cls_weight = torch.ones_like(cls_target) * self.bg_weight
+        cls_weight[cls_target != 1] = self.fg_weight
         loss_cls = self.loss_cls(cls_score,
                                  cls_target,
-                                 avg_factor=num_pos)
+                                 weight=cls_weight,
+                                 reduction_override='sum')
+        loss_cls = loss_cls / cls_score.shape[0]
         # regression loss
-        bbox_pred = bbox_pred.split(num_total_list)
-        pos_idx = pos_idx.split(num_pos_list)
-        pos_bbox_pred = [pred[idx] for pred, idx in zip(bbox_pred, pos_idx)]
-        pos_bbox_pred = torch.cat(pos_bbox_pred)
-        loss_bbox = self.loss_bbox(pos_bbox_pred,
-                                   bbox_target,
-                                   avg_factor=num_pos)
+        if num_pos > 0:
+            bbox_pred = bbox_pred.split(num_total_list)
+            pos_idx = pos_idx.split(num_pos_list)
+            pos_bbox_pred = [pred[idx] for pred, idx in zip(bbox_pred, pos_idx)]
+            pos_bbox_pred = torch.cat(pos_bbox_pred)
+            # loss_bbox = self.loss_bbox(pos_bbox_pred,
+            #                            bbox_target,
+            #                            avg_factor=num_pos)
+            loss_bbox = self.loss_bbox(pos_bbox_pred,
+                                       bbox_target,
+                                       reduction_override='none')
+            loc_loss = loss_bbox[:, :3].sum() / num_pos
+            size_loss = loss_bbox[:, 3:6].sum() / num_pos
+            angle_loss = loss_bbox[:, 6:].sum() / num_pos
+        else:
+            loc_loss = bbox_pred.sum() * 0
+            size_loss = bbox_pred.sum() * 0
+            angle_loss = bbox_pred.sum() * 0
 
-        return loss_cls, loss_bbox
+
+        # import matplotlib.pyplot as plt
+        # points = valid_coords['3d'][:, 1:].cpu()
+        # targets = valid_coords['3d'][cls_target==0][:, 1:].cpu()
+        # w, l, h = torch.tensor([1.6, 3.9, 1.56])
+        # diagonal = torch.sqrt(w**2 + l**2)
+        # x = points[cls_target==0][:, 0] + bbox_target[:, 0].cpu() * diagonal
+        # y = points[cls_target==0][:, 1] + bbox_target[:, 1].cpu() * diagonal
+
+        # plt.scatter(points[:, 1], points[:, 0], s=0.01, color='k')
+        # plt.scatter(targets[:, 1], targets[:, 0], s=0.02, color='red')
+        # plt.scatter(y, x, s=0.02, color='blue')
+        # plt.gca().set_aspect('equal')
+        # plt.savefig('test.png')
+
+        # print('test')
+
+        return loss_cls, loc_loss, size_loss, angle_loss
 
     def get_targets(self, valid_coords, gt_bboxes, gt_labels):
         """
@@ -155,6 +172,7 @@ class FVNetHead(nn.Module):
         pos_idx_list = []
         num_total_list = []
         num_pos_list = []
+        total_pos = 0
         for i in range(batch_size):
             idx = valid_coords['3d'][:, 0] == i
             boxes = gt_bboxes[i].tensor
@@ -165,9 +183,6 @@ class FVNetHead(nn.Module):
                 boxes.unsqueeze(0))[0].to(torch.long)
             pos_idx = torch.where(assigned_idx != -1)[0]
 
-            if pos_idx.shape[0] == 0:
-                continue
-
             neg_idx = torch.where(assigned_idx == -1)[0]
             num_total = points.shape[0]
             num_pos = pos_idx.shape[0]
@@ -176,21 +191,27 @@ class FVNetHead(nn.Module):
                                        dtype=torch.long, device=device)
             cls_targets[neg_idx] = 1
 
-            boxes = boxes[assigned_idx][pos_idx]
-            bbox_targets = self.bbox_coder.encode(points[pos_idx], boxes,
-                self.bbox_coder.prior_size)
-            
+            if boxes.shape[0] != 0:
+                boxes = boxes[assigned_idx][pos_idx]
+                bbox_targets = self.bbox_coder.encode(points[pos_idx], boxes,
+                    self.bbox_coder.prior_size)
             cls_targets_list.append(cls_targets)
-            bbox_targets_list.append(bbox_targets)
-            pos_idx_list.append(pos_idx)
             num_total_list.append(num_total)
             num_pos_list.append(num_pos)
+            total_pos += num_pos
+            if num_pos != 0:
+                bbox_targets_list.append(bbox_targets)
+                pos_idx_list.append(pos_idx)
         
-        if pos_idx.shape[0] == 0:
-            return None
         cls_targets = torch.cat(cls_targets_list, dim=0)
-        bbox_targets = torch.cat(bbox_targets_list, dim=0)
-        pos_idx = torch.cat(pos_idx_list, dim=0)
+        if len(pos_idx_list) != 0:
+            pos_idx = torch.cat(pos_idx_list, dim=0)
+        else:
+            pos_idx = torch.tensor([], device=device)
+        if total_pos != 0:
+            bbox_targets = torch.cat(bbox_targets_list, dim=0)
+        else:
+            bbox_targets = None
 
         return (cls_targets, bbox_targets, pos_idx,
                 num_total_list, num_pos_list)
@@ -213,11 +234,21 @@ class FVNetHead(nn.Module):
         input_metas = input_metas[0]
         scores =cls_scores.sigmoid()
 
+        # Remove False Positive
+        # from mmdet3d.ops.roiaware_pool3d import points_in_boxes_gpu
+        # valid_idx = gt_labels[0] == 0
+        # boxes = gt_bboxes[0].tensor[valid_idx].to(points.device)
+        # assigned_idx = points_in_boxes_gpu(points.unsqueeze(0),
+        #     boxes.unsqueeze(0))[0].to(torch.long)
+        # pos_inds = assigned_idx != -1
+
+        # scores_tmp = scores.clone()
+        # scores *= 0
+        # scores[pos_inds] = scores_tmp[pos_inds]
+
         # Visualize segmentation results
-        # if False:
-        if True:
-            self.visualize(valid_coords, gt_bboxes, gt_labels,
-                           points, scores, input_metas, bev_seg=True, fv_seg=True)
+        # self.visualize(valid_coords, gt_bboxes, gt_labels,
+        #                 points, scores, input_metas, bev_seg=True, fv_seg=True)
 
         nms_pre = cfg.get('nms_pre', -1)
         if nms_pre > 0 and scores.shape[0] > nms_pre:
@@ -229,7 +260,7 @@ class FVNetHead(nn.Module):
         
         bboxes = self.bbox_coder.decode(points, bbox_preds, self.bbox_coder.prior_size)
         bboxes_for_nms = xywhr2xyxyr(input_metas['box_type_3d'](
-            bboxes, box_dim=(self.box_code_size - 1)).bev)
+            bboxes, box_dim=7).bev)
 
         padding = scores.new_zeros(scores.shape[0], 1)
         scores = torch.cat([scores, padding], dim=1)
@@ -238,7 +269,7 @@ class FVNetHead(nn.Module):
         results = box3d_multiclass_nms(bboxes, bboxes_for_nms, scores,
                                        score_thr, cfg.max_num, cfg)
         bboxes, scores, labels = results
-        bboxes = input_metas['box_type_3d'](bboxes, box_dim=(self.box_code_size - 1))
+        bboxes = input_metas['box_type_3d'](bboxes, box_dim=7)
         proposals = (bboxes, scores, labels)
 
         return [proposals]
@@ -264,7 +295,7 @@ class FVNetHead(nn.Module):
 
         fv_list = []
         for i in range(points.shape[0]):
-            height, width = img_metas[i]['ori_shape'][:2]
+            width, height = img_metas[i]['img_info']['img_shape']
             inds = torch.where((pts_2d[i, 0, :] < width) & (pts_2d[i, 0, :] >= 0) &
                                (pts_2d[i, 1, :] < height) & (pts_2d[i, 1, :] >= 0) &
                                (points[i, :, 0] > 0))[0]
@@ -317,32 +348,39 @@ class FVNetHead(nn.Module):
                   bev_seg=True,
                   fv_seg=True):
         import matplotlib.pyplot as plt
+        import os
         cls_reg_targets = self.get_targets(
             valid_coords,
             gt_bboxes,
             gt_labels)
-        if cls_reg_targets is not None:
-            pos_idx = cls_reg_targets[2]
+        pos_idx = cls_reg_targets[2]
+        if pos_idx.shape[0] != 0:
             gt_points = points[pos_idx].cpu()
+            img_name = input_metas['img_info']['filename'].split('/')[-1]
 
+            threshold = 0.7
             if bev_seg:
+                if not os.path.exists('plots/seg_bev'):
+                    os.makedirs('plots/seg_bev')
                 plt.scatter(points[:, 1].cpu(), points[:, 0].cpu(), s=0.01)
                 plt.scatter(gt_points[:, 1],
                             gt_points[:, 0], s=0.2, color='r')
                 plt.scatter(points[:, 1].cpu() + 50, points[:, 0].cpu(), s=0.01)
-                idx = scores > 0.5
+                idx = scores > threshold
                 fg_points = points[idx.reshape(-1)]
                 plt.scatter(fg_points[:, 1].cpu() + 50, fg_points[:, 0].cpu(), s=0.2, color='r')
                 plt.xlim(-30, 80)
                 plt.ylim(0, 70)
                 plt.gca().set_aspect('equal', adjustable='box')
-                plt.savefig(f"plots/seg_bev/{input_metas['sample_idx']}.png")
+                plt.savefig(f"plots/seg_bev/{img_name}")
                 plt.close()
 
             if fv_seg:
+                if not os.path.exists('plots/seg_fv'):
+                    os.makedirs('plots/seg_fv')
                 fv = self.pts_to_fv([points], [input_metas]) 
                 fv_gt = self.pts_to_fv([gt_points], [input_metas])
-                idx = scores > 0.5
+                idx = scores > threshold
                 fv_pred = self.pts_to_fv([points[idx.reshape(-1)]], [input_metas])
 
                 import matplotlib.pyplot as plt
@@ -357,6 +395,6 @@ class FVNetHead(nn.Module):
                 plt.gca().set_aspect('equal', adjustable='box')
                 plt.xlim(0, 1300)
                 plt.ylim(-800, 0)
-                plt.savefig(f"plots/seg_fv/{input_metas['sample_idx']}.png")
+                plt.savefig(f"plots/seg_fv/{img_name}")
                 plt.close()
     

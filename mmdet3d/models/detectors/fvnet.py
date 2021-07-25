@@ -11,6 +11,7 @@ from mmdet.models import DETECTORS, build_backbone, build_neck, build_head
 class FVNet(Base3DDetector):
 
     def __init__(self,
+                 projection_cfg=None,
                  fv_backbone=None,
                  fv_neck=None,
                  img_backbone=None,
@@ -23,6 +24,7 @@ class FVNet(Base3DDetector):
                  pretrained=None):
         super(FVNet, self).__init__(init_cfg)
 
+        self.projection_cfg = projection_cfg
         if fv_backbone:
             self.fv_backbone = build_backbone(fv_backbone)
         if fv_neck:
@@ -126,7 +128,7 @@ class FVNet(Base3DDetector):
 
         fv_list = []
         for i in range(points.shape[0]):
-            height, width = img_metas[i]['ori_shape'][:2]
+            width, height = img_metas[i]['img_info']['img_shape']
             inds = torch.where((pts_2d[i, 0, :] < width) & (pts_2d[i, 0, :] >= 0) &
                                (pts_2d[i, 1, :] < height) & (pts_2d[i, 1, :] >= 0))[0]
             imgfov_pc_pixel = pts_2d[i, :, inds]
@@ -169,12 +171,11 @@ class FVNet(Base3DDetector):
         new_fv_list = []
         for i in range(len(fv_list)):
             # Resize
-            fv = fv_list[i] # (5, h, w)
-            w_scale, h_scale = img_metas[i]['scale_factor'][:2]
-            h_src, w_src = fv.shape[1], fv.shape[2]
-            h_des = int(round(h_src * h_scale))
-            w_des = int(round(w_src * w_scale))
-            if not (h_scale == 1. and w_scale == 1.):
+            fv = fv_list[i]
+            w_src, h_src = fv.shape[2], fv.shape[1]
+            w_des, h_des = self.projection_cfg['size']
+            w_scale, h_scale = (w_des / w_src, h_des / h_src)
+            if not (w_scale == 1. and h_scale == 1.):
                 fv_resized = torch.zeros((fv.shape[0], h_des, w_des),
                                           dtype=fv.dtype,
                                           device=fv.device)
@@ -185,7 +186,7 @@ class FVNet(Base3DDetector):
                 fv_resized[:, des_v, des_u] = fv[:, src_idx[0, :], src_idx[1, :]]
                 fv = fv_resized
             # Padding
-            divisor = img_metas[i]['pad_size_divisor']
+            divisor = self.projection_cfg['divisor']
             h_src, w_src = fv.shape[1], fv.shape[2]
             h_des = math.ceil(fv.shape[1] / divisor) * divisor
             w_des = math.ceil(fv.shape[2] / divisor) * divisor
@@ -229,6 +230,20 @@ class FVNet(Base3DDetector):
 
         fv = self.pts_to_fv(points, img_metas) # list B x (5, h, w)
         fv = self.resize_and_pad(fv, img_metas) # (B, 5, h', w')
+
+        # flip
+        p = torch.rand(1)[0]
+        if p > 0.5:
+            fv = torch.flip(fv, dims=[3])
+            fv[:, 1, :, :] *= -1
+            for i in range(len(gt_bboxes_3d)):
+                gt_bboxes_3d[i].tensor[:, 1] *= -1
+        # # scale
+        scale_factor = torch.rand(1).item() * 0.1 + 0.95
+        fv[:, :3, :, :] *= scale_factor
+        for i in range(len(gt_bboxes_3d)):
+            gt_bboxes_3d[i].tensor[:, :6] *= scale_factor
+
         valid_coords = self.get_valid_coords(fv)
         fv_feats, img_feats = self.extract_feat(fv, imgs, img_metas)
         feats = self.fusion(fv_feats, img_feats, self.fusion_mode)
